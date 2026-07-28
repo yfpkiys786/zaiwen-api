@@ -236,6 +236,58 @@ const ROUTES = {
     json(res, 200, { deleted, sessionId: sid });
   },
 
+  // ==================== OpenAI 兼容接口 ====================
+  "GET /v1/models": async (req, res) => {
+    json(res, 200, {
+      object: "list",
+      data: [
+        {
+          id: "zaiwen-auto",
+          object: "model",
+          created: 0,
+          owned_by: "zaiwen",
+        },
+      ],
+    });
+  },
+
+  "POST /v1/chat/completions": async (req, res) => {
+    const body = await readBody(req);
+    const messages = body.messages || [];
+    const lastMsg = messages[messages.length - 1];
+    const content = lastMsg?.content || "";
+
+    if (!content.trim()) {
+      return json(res, 400, { error: "message 不能为空" });
+    }
+
+    const model = body.model || "zaiwen-auto";
+
+    try {
+      const result = await client.chat(content, { model });
+      json(res, 200, {
+        id: "chatcmpl-" + Date.now(),
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: result.model,
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: result.reply },
+            finish_reason: "stop",
+          },
+        ],
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+        },
+      });
+    } catch (e) {
+      json(res, 500, { error: e.message });
+    }
+  },
+
   // ==================== 管理接口 ====================
   "POST /v1/admin/tokens": async (req, res) => {
     const body = await readBody(req);
@@ -327,11 +379,13 @@ server.listen(PORT, () => {
   console.log(`  Redis:    ${redis ? "✓ 已连接（token持久化）" : "✗ 未配置（重启丢失token变更）"}`);
   console.log(`  管理密钥: ${ADMIN_KEY === "zaiwen-admin" ? "⚠ 使用默认值,建议修改ADMIN_KEY" : "✓ 已自定义"}`);
   console.log(`  接口:`);
-  console.log(`    POST /v1/chat            单轮对话`);
-  console.log(`    POST /v1/chat/session    多轮对话`);
-  console.log(`    GET  /v1/tokens          Token状态`);
-  console.log(`    GET  /v1/health           健康检查`);
-  console.log(`    POST /v1/admin/tokens     添加Token`);
-  console.log(`    DELETE /v1/admin/tokens  删除Token`);
+  console.log(`    POST /v1/chat              单轮对话`);
+  console.log(`    POST /v1/chat/session      多轮对话`);
+  console.log(`    GET  /v1/tokens            Token状态`);
+  console.log(`    GET  /v1/health            健康检查`);
+  console.log(`    GET  /v1/models            【OpenAI兼容】模型列表`);
+  console.log(`    POST /v1/chat/completions  【OpenAI兼容】对话`);
+  console.log(`    POST /v1/admin/tokens      添加Token`);
+  console.log(`    DELETE /v1/admin/tokens    删除Token`);
   console.log("=" .repeat(52));
 });
