@@ -5,15 +5,18 @@
  *
  * 启动: node server.mjs
  * 环境变量:
- *   PORT=3456          服务端口 (默认3456)
- *   TOKENS=token1,token2  多个token逗号分隔
- *   MIN_BALANCE=100     最低余额阈值
+ *   PORT=3456               服务端口
+ *   TOKENS=token1,token2    初始token（部署时填一次，之后用接口管理）
+ *   MIN_BALANCE=100         最低余额阈值
+ *   ADMIN_KEY=yourkey       管理接口密钥（保护增删token操作）
  *
  * 接口:
  *   POST /v1/chat              单轮对话
- *   POST /v1/chat/session      多轮对话 (自动管理上下文)
- *   GET  /v1/tokens            查看token池状态
+ *   POST /v1/chat/session      多轮对话
+ *   GET  /v1/tokens            Token池状态+余额
  *   GET  /v1/health            健康检查
+ *   POST /v1/admin/tokens      添加token  {token, adminKey}
+ *   DELETE /v1/admin/tokens    删除token  {token, adminKey}
  */
 
 import http from "node:http";
@@ -41,10 +44,37 @@ loadEnv(path.resolve(".env"));
 
 // ==================== 配置 ====================
 const PORT = parseInt(process.env.PORT || "3456", 10);
-const TOKENS_STR = process.env.TOKENS || "";
+const ADMIN_KEY = process.env.ADMIN_KEY || "zaiwen-admin";
 const MIN_BALANCE = parseInt(process.env.MIN_BALANCE || "100", 10);
 
-const tokens = TOKENS_STR.split(",").map((t) => t.trim()).filter(Boolean);
+// Token 持久化文件
+const TOKENS_FILE = path.resolve("tokens_data.json");
+
+// ==================== Token 持久化 ====================
+function loadTokens() {
+  // 优先从持久化文件加载
+  try {
+    if (fs.existsSync(TOKENS_FILE)) {
+      const saved = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8"));
+      if (Array.isArray(saved) && saved.length > 0) {
+        console.log(`[持久化] 从 tokens_data.json 加载了 ${saved.length} 个 token`);
+        return saved;
+      }
+    }
+  } catch (e) {
+    console.warn("[持久化] 读取失败，回退到环境变量:", e.message);
+  }
+  // 回退到环境变量
+  const str = process.env.TOKENS || "";
+  return str.split(",").map((t) => t.trim()).filter(Boolean);
+}
+
+function saveTokens() {
+  const list = client.tokens;
+  fs.writeFileSync(TOKENS_FILE, JSON.stringify(list, null, 2), "utf-8");
+}
+
+let tokens = loadTokens();
 
 if (tokens.length === 0) {
   console.error("[错误] 未配置 TOKENS 环境变量");
@@ -165,6 +195,54 @@ const ROUTES = {
     const deleted = sessions.delete(sid);
     json(res, 200, { deleted, sessionId: sid });
   },
+
+  // ==================== 管理接口 ====================
+  "POST /v1/admin/tokens": async (req, res) => {
+    const body = await readBody(req);
+    if (body.adminKey !== ADMIN_KEY) {
+      return json(res, 403, { error: "adminKey 不正确" });
+    }
+    if (!body.token || !body.token.trim()) {
+      return json(res, 400, { error: "token 不能为空" });
+    }
+    const t = body.token.trim();
+    client.addToken(t);
+    saveTokens();
+    json(res, 200, {
+      ok: true,
+      message: "Token 已添加",
+      count: client.tokens.length,
+      added: t.slice(0, 20) + "..." + t.slice(-10),
+    });
+  },
+
+  "DELETE /v1/admin/tokens": async (req, res) => {
+    const body = await readBody(req);
+    if (body.adminKey !== ADMIN_KEY) {
+      return json(res, 403, { error: "adminKey 不正确" });
+    }
+    if (!body.token) {
+      return json(res, 400, { error: "请提供要删除的 token（完整值或前缀）" });
+    }
+    // 支持前缀匹配删除
+    const target = body.token.trim();
+    const allTokens = client.tokens;
+    let found = allTokens.find((t) => t === target);
+    if (!found) {
+      found = allTokens.find((t) => t.startsWith(target));
+    }
+    if (!found) {
+      return json(res, 404, { error: "未找到匹配的 token", hint: "请提供完整 token 或更长前缀" });
+    }
+    client.removeToken(found);
+    saveTokens();
+    json(res, 200, {
+      ok: true,
+      message: "Token 已删除",
+      count: client.tokens.length,
+      removed: found.slice(0, 20) + "..." + found.slice(-10),
+    });
+  },
 };
 
 // ==================== HTTP Server ====================
@@ -206,10 +284,13 @@ server.listen(PORT, () => {
   console.log(`  端口:     ${PORT}`);
   console.log(`  Token数:  ${tokens.length}`);
   console.log(`  最低余额: ${MIN_BALANCE}`);
+  console.log(`  管理密钥: ${ADMIN_KEY === "zaiwen-admin" ? "⚠ 使用默认值,建议在.env中修改ADMIN_KEY" : "✓ 已自定义"}`);
   console.log(`  接口:`);
-  console.log(`    POST /v1/chat           单轮对话`);
-  console.log(`    POST /v1/chat/session   多轮对话`);
+  console.log(`    POST /v1/chat            单轮对话`);
+  console.log(`    POST /v1/chat/session    多轮对话`);
   console.log(`    GET  /v1/tokens          Token状态`);
-  console.log(`    GET  /v1/health          健康检查`);
+  console.log(`    GET  /v1/health           健康检查`);
+  console.log(`    POST /v1/admin/tokens     添加Token`);
+  console.log(`    DELETE /v1/admin/tokens  删除Token`);
   console.log("=" .repeat(52));
 });

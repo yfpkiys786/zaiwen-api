@@ -1,4 +1,5 @@
 .env
+tokens_data.json
 node_modules/
 logs/
 *.log
