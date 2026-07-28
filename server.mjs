@@ -1,14 +1,15 @@
 /**
  * 在问AI API 服务
  * ================
- * 零外部依赖，纯 Node.js 内置模块
+ * 零外部npm依赖，纯 Node.js 内置模块 + Redis 云存储
  *
  * 启动: node server.mjs
  * 环境变量:
  *   PORT=3456               服务端口
- *   TOKENS=token1,token2    初始token（部署时填一次，之后用接口管理）
+ *   TOKENS=token1,token2    初始token（仅首次部署填写）
  *   MIN_BALANCE=100         最低余额阈值
- *   ADMIN_KEY=yourkey       管理接口密钥（保护增删token操作）
+ *   ADMIN_KEY=yourkey       管理接口密钥
+ *   REDIS_URL=redis://...    Redis连接地址（token持久化）
  *
  * 接口:
  *   POST /v1/chat              单轮对话
@@ -23,6 +24,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { ZaiwenClient } from "./zaiwen_client.mjs";
+import { RedisClient } from "./redis_client.mjs";
 
 // ==================== 加载 .env 文件 (零依赖) ====================
 function loadEnv(filePath) {
@@ -44,37 +46,70 @@ loadEnv(path.resolve(".env"));
 
 // ==================== 配置 ====================
 const PORT = parseInt(process.env.PORT || "3456", 10);
+const REDIS_URL = process.env.REDIS_URL || "";
 const ADMIN_KEY = process.env.ADMIN_KEY || "zaiwen-admin";
 const MIN_BALANCE = parseInt(process.env.MIN_BALANCE || "100", 10);
 
-// Token 持久化文件
-const TOKENS_FILE = path.resolve("tokens_data.json");
+const REDIS_KEY = "zaiwen:tokens";
 
-// ==================== Token 持久化 ====================
-function loadTokens() {
-  // 优先从持久化文件加载
+// ==================== Redis + Token 持久化 ====================
+let redis = null;
+if (REDIS_URL) {
   try {
-    if (fs.existsSync(TOKENS_FILE)) {
-      const saved = JSON.parse(fs.readFileSync(TOKENS_FILE, "utf-8"));
-      if (Array.isArray(saved) && saved.length > 0) {
-        console.log(`[持久化] 从 tokens_data.json 加载了 ${saved.length} 个 token`);
-        return saved;
-      }
-    }
+    redis = new RedisClient(REDIS_URL);
+    await redis.ping();
+    console.log("[Redis] ✓ 已连接");
   } catch (e) {
-    console.warn("[持久化] 读取失败，回退到环境变量:", e.message);
+    console.warn("[Redis] 连接失败:", e.message);
+    console.warn("[Redis] 将回退到环境变量加载 token");
+    redis = null;
   }
-  // 回退到环境变量
+}
+
+async function loadTokens() {
+  // 1. 优先从 Redis 加载
+  if (redis) {
+    try {
+      const raw = await redis.get(REDIS_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (Array.isArray(saved) && saved.length > 0) {
+          console.log(`[Redis] 加载了 ${saved.length} 个 token`);
+          return saved;
+        }
+      }
+    } catch (e) {
+      console.warn("[Redis] 读取失败:", e.message);
+    }
+  }
+
+  // 2. 回退到环境变量
   const str = process.env.TOKENS || "";
-  return str.split(",").map((t) => t.trim()).filter(Boolean);
+  const envTokens = str.split(",").map((t) => t.trim()).filter(Boolean);
+  if (envTokens.length > 0) {
+    console.log(`[环境变量] 加载了 ${envTokens.length} 个 token（建议用接口管理）`);
+    // 同步到 Redis
+    if (redis) {
+      try {
+        await redis.set(REDIS_KEY, JSON.stringify(envTokens));
+        console.log("[Redis] 已同步环境变量 token 到 Redis");
+      } catch {}
+    }
+  }
+  return envTokens;
 }
 
-function saveTokens() {
-  const list = client.tokens;
-  fs.writeFileSync(TOKENS_FILE, JSON.stringify(list, null, 2), "utf-8");
+async function saveTokens() {
+  if (redis) {
+    try {
+      await redis.set(REDIS_KEY, JSON.stringify(client.tokens));
+    } catch (e) {
+      console.warn("[Redis] 保存失败:", e.message);
+    }
+  }
 }
 
-let tokens = loadTokens();
+let tokens = await loadTokens();
 
 if (tokens.length === 0) {
   console.error("[错误] 未配置 TOKENS 环境变量");
@@ -116,7 +151,12 @@ const sessions = new Map();
 
 const ROUTES = {
   "GET /v1/health": async (req, res) => {
-    json(res, 200, { status: "ok", uptime: process.uptime(), tokens: tokens.length });
+    json(res, 200, {
+      status: "ok",
+      uptime: process.uptime(),
+      tokens: client.tokens.length,
+      redis: !!redis,
+    });
   },
 
   "GET /v1/tokens": async (req, res) => {
@@ -207,7 +247,7 @@ const ROUTES = {
     }
     const t = body.token.trim();
     client.addToken(t);
-    saveTokens();
+    await saveTokens();
     json(res, 200, {
       ok: true,
       message: "Token 已添加",
@@ -235,7 +275,7 @@ const ROUTES = {
       return json(res, 404, { error: "未找到匹配的 token", hint: "请提供完整 token 或更长前缀" });
     }
     client.removeToken(found);
-    saveTokens();
+    await saveTokens();
     json(res, 200, {
       ok: true,
       message: "Token 已删除",
@@ -282,9 +322,10 @@ server.listen(PORT, () => {
   console.log("  在问AI API 服务已启动");
   console.log("=" .repeat(52));
   console.log(`  端口:     ${PORT}`);
-  console.log(`  Token数:  ${tokens.length}`);
+  console.log(`  Token数:  ${client.tokens.length}`);
   console.log(`  最低余额: ${MIN_BALANCE}`);
-  console.log(`  管理密钥: ${ADMIN_KEY === "zaiwen-admin" ? "⚠ 使用默认值,建议在.env中修改ADMIN_KEY" : "✓ 已自定义"}`);
+  console.log(`  Redis:    ${redis ? "✓ 已连接（token持久化）" : "✗ 未配置（重启丢失token变更）"}`);
+  console.log(`  管理密钥: ${ADMIN_KEY === "zaiwen-admin" ? "⚠ 使用默认值,建议修改ADMIN_KEY" : "✓ 已自定义"}`);
   console.log(`  接口:`);
   console.log(`    POST /v1/chat            单轮对话`);
   console.log(`    POST /v1/chat/session    多轮对话`);

@@ -26,7 +26,7 @@ if [ ! -f .env ]; then
   echo "=================================="
   echo ""
   echo "  第1步: cp .env.example .env"
-  echo "  第2步: vim .env  # 填入你的 TOKENS 和 PORT"
+  echo "  第2步: vim .env  # 填入 TOKENS, REDIS_URL, ADMIN_KEY"
   echo ""
   exit 1
 fi
