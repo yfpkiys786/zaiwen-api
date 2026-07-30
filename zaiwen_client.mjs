@@ -283,10 +283,15 @@ export class ZaiwenClient {
     const headers = buildHeaders(token);
     headers["Content-Length"] = Buffer.byteLength(payload);
 
+    console.log("[zaiwen] 请求:", content.slice(0, 30));
+
     const { status, raw, data } = await httpRequest(
       `https://back.zaiwenai.com/api/v1/ai/message/stream`,
       { method: "POST", headers, body: payload, timeout: 120000 }
     );
+
+    console.log("[zaiwen] HTTP状态:", status);
+    console.log("[zaiwen] raw前200字符:", raw?.slice(0, 200));
 
     if (status !== 200) {
       // 可能是 token 过期
@@ -310,9 +315,12 @@ export class ZaiwenClient {
       try { events.push(JSON.parse(d)); } catch {}
     }
 
+    console.log("[zaiwen] 事件总数:", events.length);
+
     let convId = "";
     let fullText = "";
     let modelUsed = "";
+    let streamingCount = 0;
 
     for (const ev of events) {
       switch (ev.type) {
@@ -321,6 +329,7 @@ export class ZaiwenClient {
           modelUsed = ev.data?.model || modelUsed;
           break;
         case "streaming":
+          streamingCount++;
           fullText += ev.content || "";
           break;
         case "assistant-message":
@@ -330,6 +339,9 @@ export class ZaiwenClient {
           throw new Error(ev.content || JSON.stringify(ev));
       }
     }
+
+    console.log("[zaiwen] streaming事件:", streamingCount, "| fullText长度:", fullText.length);
+    console.log("[zaiwen] fullText前100:", fullText.slice(0, 100));
 
     // 分离思考过程
     let thinking = "";
@@ -350,6 +362,8 @@ export class ZaiwenClient {
       thinking = thinkLines.join("\n").trim();
       reply = replyLines.join("\n").trim() || fullText.trim();
     }
+
+    console.log("[zaiwen] reply长度:", reply.length, "| 前100:", reply.slice(0, 100));
 
     return { reply, thinking, conversationId: convId, model: modelUsed, token };
   }
