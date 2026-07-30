@@ -50,6 +50,26 @@ const REDIS_URL = process.env.REDIS_URL || "";
 const ADMIN_KEY = process.env.ADMIN_KEY || "zaiwen-admin";
 const MIN_BALANCE = parseInt(process.env.MIN_BALANCE || "100", 10);
 
+// ==================== 版本信息（用于检测 Render 是否更新） ====================
+function getGitCommit() {
+  try {
+    const headPath = path.resolve(".git/HEAD");
+    if (!fs.existsSync(headPath)) return null;
+    const head = fs.readFileSync(headPath, "utf-8").trim();
+    if (head.startsWith("ref: ")) {
+      const refPath = path.resolve(".git", head.slice(5));
+      if (fs.existsSync(refPath)) {
+        return fs.readFileSync(refPath, "utf-8").trim().slice(0, 7);
+      }
+    }
+    return head.slice(0, 7);
+  } catch {
+    return null;
+  }
+}
+const GIT_COMMIT = getGitCommit();
+const DEPLOY_TIME = new Date().toISOString();
+
 const REDIS_KEY = "zaiwen:tokens";
 
 // ==================== Redis + Token 持久化 ====================
@@ -153,6 +173,8 @@ const ROUTES = {
   "GET /v1/health": async (req, res) => {
     json(res, 200, {
       status: "ok",
+      version: GIT_COMMIT || "unknown",
+      deployTime: DEPLOY_TIME,
       uptime: process.uptime(),
       tokens: client.tokens.length,
       redis: !!redis,
@@ -265,6 +287,8 @@ const ROUTES = {
 
     try {
       const result = await client.chat(content, { model });
+      console.log("[server] result.reply:", JSON.stringify(result.reply).slice(0, 200));
+      console.log("[server] result.model:", result.model);
       json(res, 200, {
         id: "chatcmpl-" + Date.now(),
         object: "chat.completion",
@@ -278,9 +302,9 @@ const ROUTES = {
           },
         ],
         usage: {
-          prompt_tokens: 0,
-          completion_tokens: 0,
-          total_tokens: 0,
+          prompt_tokens: result.reply.length,
+          completion_tokens: result.reply.length,
+          total_tokens: result.reply.length,
         },
       });
     } catch (e) {
@@ -373,6 +397,7 @@ server.listen(PORT, () => {
   console.log("=" .repeat(52));
   console.log("  在问AI API 服务已启动");
   console.log("=" .repeat(52));
+  console.log(`  版本:     ${GIT_COMMIT || "unknown"} (${DEPLOY_TIME})`);
   console.log(`  端口:     ${PORT}`);
   console.log(`  Token数:  ${client.tokens.length}`);
   console.log(`  最低余额: ${MIN_BALANCE}`);
